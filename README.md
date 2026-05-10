@@ -40,6 +40,24 @@ You can also pass files to the face script:
 python face_opencv.py --input path/to/image.jpg
 ```
 
+### QR Code Detection
+
+For QR code detection, use `qr_code.py`. It supports image files, standard USB cameras, and the Raspberry Pi camera module.
+
+```bash
+# Detect from an image
+python qr_code.py --image path/to/image.jpg
+
+# Detect from camera 0 (default if no source specified)
+python qr_code.py
+
+# Detect from Pi Camera Module (requires picamera2)
+python qr_code.py --picamera
+
+# Run in headless mode (no preview window)
+python qr_code.py --headless --output detections.txt
+```
+
 To choose the export format:
 
 ```bash

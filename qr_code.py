@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 import sys
 from datetime import datetime
+from glob import glob
 import time
 
 import cv2
@@ -85,6 +86,14 @@ def detect_from_camera(
     headless: bool,
     cooldown_seconds: float,
 ) -> int:
+    if camera_index == 0 and not glob("/dev/video0"):
+        print(
+            "Error: no USB camera found at /dev/video0. "
+            "Connect a camera or pass a different --camera index.",
+            file=sys.stderr,
+        )
+        return 1
+
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         print(f"Error: could not open camera {camera_index}", file=sys.stderr)
@@ -124,8 +133,9 @@ def detect_from_camera(
                     cv2.line(frame, pt1, pt2, (0, 255, 0), 3)
                 
                 # Calculate and draw center circle
-                center_x = int(sum(p[0] for p in points[0]) / 4)
-                center_y = int(sum(p[1] for p in points[0]) / 4)
+                num_pts = len(points[0])
+                center_x = int(sum(p[0] for p in points[0]) / num_pts)
+                center_y = int(sum(p[1] for p in points[0]) / num_pts)
                 cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
 
                 x, y = points[0][0]
@@ -161,12 +171,30 @@ def detect_from_camera(
     return 0
 
 
-def detect_from_picamera(output_path: Path | None, headless: bool, cooldown_seconds: float) -> int:
+def detect_from_picamera(
+    output_path: Path | None,
+    headless: bool,
+    cooldown_seconds: float,
+    fallback_camera_index: int = 0,
+) -> int:
     if not PICAM_AVAILABLE:
-        print("Error: Picamera2 library is not installed. Use --camera instead.", file=sys.stderr)
-        return 1
-    
-    picam2 = Picamera2()
+        print(
+            "Warning: Picamera2 library is not installed. Falling back to camera "
+            f"{fallback_camera_index}.",
+            file=sys.stderr,
+        )
+        return detect_from_camera(fallback_camera_index, output_path, headless, cooldown_seconds)
+
+    try:
+        picam2 = Picamera2()
+    except Exception as exc:
+        print(
+            f"Warning: could not initialize Pi camera: {exc}. "
+            f"Falling back to camera {fallback_camera_index}.",
+            file=sys.stderr,
+        )
+        return detect_from_camera(fallback_camera_index, output_path, headless, cooldown_seconds)
+
     config = picam2.create_preview_configuration(main={"size": (1280, 720), "format": "RGB888"})
     picam2.configure(config)
     picam2.start()
@@ -258,10 +286,16 @@ def main() -> int:
 
     if args.image:
         return detect_from_image(args.image, args.headless)
-    
+
     if args.picamera:
-        return detect_from_picamera(output_path, args.headless, args.cooldown)
-    
+        fallback_camera_index = args.camera if args.camera is not None else 0
+        return detect_from_picamera(
+            output_path,
+            args.headless,
+            args.cooldown,
+            fallback_camera_index=fallback_camera_index,
+        )
+
     # Default to camera 0 if no source specified
     camera_idx = args.camera if args.camera is not None else 0
     return detect_from_camera(camera_idx, output_path, args.headless, args.cooldown)
