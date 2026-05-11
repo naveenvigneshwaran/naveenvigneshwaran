@@ -1,80 +1,73 @@
-import signal
-import sys
-from picamera2 import Picamera2
 import cv2
 import numpy as np
+from picamera2 import Picamera2
 
-# Global flag
-running = True
-
-def signal_handler(sig, frame):
-    global running
-    print("\nInterrupted! Stopping...")
-    running = False
-
-signal.signal(signal.SIGINT, signal_handler)
-
-# Load class labels
-CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-           "dog", "horse", "motorbike", "person", "pottedplant",
-           "sheep", "sofa", "train", "tvmonitor"]
-
-# Load model
-net = cv2.dnn.readNetFromCaffe("deploy.prototxt",
-                               "mobilenet_iter_73000.caffemodel")
-
-# Camera setup
+# ---------------- CAMERA ----------------
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"format": "RGB888", "size": (640, 480)}))
+
+config = picam2.create_preview_configuration(
+    main={"format": "RGB888", "size": (640, 480)}
+)
+
+picam2.configure(config)
 picam2.start()
 
-print("Starting detection... Press 'q' to quit, or Ctrl+C to exit")
+cv2.namedWindow("Vending QR System", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Vending QR System", 640, 480)
 
-try:
-    while running:
-        frame = picam2.capture_array()
+# ---------------- QR DETECTOR ----------------
+detector = cv2.QRCodeDetector()
 
-        # Prepare image for detection
-        blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
-                                      0.007843, (300, 300), 127.5)
+# ---------------- ONLY VALID VENDING QR ----------------
+VALID_VENDING_QR = "QR.png"
 
-        net.setInput(blob)
-        detections = net.forward()
+while True:
 
-        h, w = frame.shape[:2]
+    frame = picam2.capture_array()
 
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
+    data, bbox, _ = detector.detectAndDecode(frame)
 
-            if confidence > 0.5:
-                idx = int(detections[0, 0, i, 1])
-                label = CLASSES[idx]
+    # ---------------- NO QR ----------------
+    if not data or bbox is None:
+        cv2.putText(frame, "NO VALID QR", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                (x1, y1, x2, y2) = box.astype("int")
+    else:
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"{label}: {confidence:.2f}",
-                            (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (0, 255, 0), 2)
+        bbox = bbox[0].astype(int)
 
-        cv2.imshow("Object Detection", frame)
+        # ---------------- CHECK QR ----------------
+        if data == VALID_VENDING_QR:
+            status = "VENDING ACCESS GRANTED"
+            color = (0, 255, 0)
 
-        # Check for exit conditions
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            print("'q' pressed, exiting...")
-            break
-        if cv2.getWindowProperty("Object Detection", cv2.WND_PROP_VISIBLE) < 1:
-            print("Window closed, exiting...")
-            break
-except Exception as e:
-    print(f"Error: {e}")
-finally:
-    running = False
-    cv2.destroyAllWindows()
-    picam2.stop()
-    print("Cleanup done. Exiting.")
-    sys.exit(0)
+        else:
+            status = "INVALID QR - REJECTED"
+            color = (0, 0, 255)
+
+        # ---------------- DRAW BOX ----------------
+        for i in range(4):
+            cv2.line(frame,
+                     tuple(bbox[i]),
+                     tuple(bbox[(i + 1) % 4]),
+                     color, 3)
+
+        # ---------------- TEXT ----------------
+        cv2.putText(frame, status, (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        cv2.putText(frame, f"QR DATA: {data}", (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+        # ---------------- ACTION SIMULATION ----------------
+        if data == VALID_VENDING_QR:
+            cv2.putText(frame, ">> DISPENSE PRODUCT", (20, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+
+    cv2.imshow("Vending QR System", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cv2.destroyAllWindows()
+picam2.close()
