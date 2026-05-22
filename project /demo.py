@@ -1,41 +1,57 @@
-from ultralytics import YOLO
 from pyzbar.pyzbar import decode
+from picamera2 import Picamera2
 
 import cv2
 import numpy as np
 import time
 
-from picamera2 import Picamera2
+# ==========================================
+# PERFORMANCE SETTINGS
+# ==========================================
 
-# ======================================
-# SETTINGS
-# ======================================
+cv2.setUseOptimized(True)
 
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
+# ==========================================
+# CAMERA SETTINGS
+# ==========================================
+
+FRAME_WIDTH = 960
+FRAME_HEIGHT = 540
+
+FPS_LIMIT = 30
+
+# ==========================================
+# QR SETTINGS
+# ==========================================
 
 ALLOWED_QR = "http://bn.m.wikipedia.org"
 
 REAL_QR_WIDTH = 5.0
-FOCAL_LENGTH = 700
+FOCAL_LENGTH = 950
 
-MAX_ZOOM = 1.8
-ZOOM_SPEED = 0.12
+# ==========================================
+# ZOOM SETTINGS
+# ==========================================
 
-SMOOTHING = 0.25
-BOX_SCALE = 0.55
+MIN_ZOOM = 1.0
+MAX_ZOOM = 3.5
 
-LOCK_TIMEOUT = 40
+ZOOM_SPEED = 0.08
+SMOOTHING = 0.12
 
-# ======================================
-# LOAD YOLO
-# ======================================
+DEAD_ZONE = 20
 
-model = YOLO("yolov8n.pt")
+BOX_SCALE = 0.75
 
-# ======================================
+# ==========================================
+# DETECTION SETTINGS
+# ==========================================
+
+SCALES = [1.0, 1.4, 1.8]
+
+# ==========================================
 # PICAMERA2 SETUP
-# ======================================
+# ==========================================
 
 picam2 = Picamera2()
 
@@ -52,31 +68,48 @@ picam2.configure(camera_config)
 
 picam2.start()
 
+# ==========================================
+# AUTOFOCUS
+# ==========================================
+
+try:
+
+    picam2.set_controls({
+        "AfMode": 2
+    })
+
+except:
+
+    print("Autofocus not supported")
+
 time.sleep(2)
 
-# ======================================
-# VARIABLES
-# ======================================
+# ==========================================
+# TRACKING VARIABLES
+# ==========================================
 
 smooth_x = FRAME_WIDTH // 2
 smooth_y = FRAME_HEIGHT // 2
 
 zoom_level = 1.0
 
+locked_qr = None
+
+last_seen_time = time.time()
+
 prev_time = time.time()
 
-locked_qr = None
-lost_counter = 0
-
-# ======================================
+# ==========================================
 # MAIN LOOP
-# ======================================
+# ==========================================
 
 while True:
 
-    # ======================================
-    # CAMERA FRAME
-    # ======================================
+    loop_start = time.time()
+
+    # ==========================================
+    # CAPTURE FRAME
+    # ==========================================
 
     frame = picam2.capture_array()
 
@@ -87,14 +120,17 @@ while True:
 
     frame = cv2.resize(
         frame,
-        (FRAME_WIDTH, FRAME_HEIGHT)
+        (
+            FRAME_WIDTH,
+            FRAME_HEIGHT
+        )
     )
 
-    original = frame.copy()
+    original_frame = frame.copy()
 
-    # ======================================
+    # ==========================================
     # FPS
-    # ======================================
+    # ==========================================
 
     current_time = time.time()
 
@@ -105,32 +141,85 @@ while True:
 
     prev_time = current_time
 
-    # ======================================
-    # IMAGE PROCESSING
-    # ======================================
+    # ==========================================
+    # PREPROCESSING
+    # ==========================================
 
     gray = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2GRAY
     )
 
+    # CLAHE CONTRAST
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+
+    gray = clahe.apply(gray)
+
+    # LIGHT SHARPEN
+    sharpen_kernel = np.array([
+        [0, -1, 0],
+        [-1, 5, -1],
+        [0, -1, 0]
+    ])
+
+    gray = cv2.filter2D(
+        gray,
+        -1,
+        sharpen_kernel
+    )
+
+    # LIGHT DENOISE
     gray = cv2.GaussianBlur(
         gray,
         (3, 3),
         0
     )
 
-    # ======================================
-    # QR DETECTION
-    # ======================================
+    # ADAPTIVE THRESHOLD
+    processed = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2
+    )
 
-    qr_codes = decode(gray)
+    # ==========================================
+    # QR DETECTION
+    # ==========================================
+
+    qr_codes = []
+
+    detection_scale = 1.0
+
+    for scale in SCALES:
+
+        resized = cv2.resize(
+            processed,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_CUBIC
+        )
+
+        detected = decode(resized)
+
+        if detected:
+
+            qr_codes = detected
+            detection_scale = scale
+
+            break
 
     found_target = False
 
-    # ======================================
+    # ==========================================
     # QR PROCESSING
-    # ======================================
+    # ==========================================
 
     for qr in qr_codes:
 
@@ -138,57 +227,77 @@ while True:
 
         x, y, w, h = qr.rect
 
-        # ======================================
-        # LOCK FIRST QR
-        # ======================================
+        # SCALE BACK
+        x = int(x / detection_scale)
+        y = int(y / detection_scale)
+        w = int(w / detection_scale)
+        h = int(h / detection_scale)
 
+        # LOCK FIRST QR
         if locked_qr is None:
+
             locked_qr = qr_data
 
+        # TRACK ONLY LOCKED QR
         if qr_data != locked_qr:
+
             continue
 
         found_target = True
-        lost_counter = 0
 
-        # ======================================
-        # CENTER
-        # ======================================
+        last_seen_time = time.time()
+
+        # ==========================================
+        # CENTER POSITION
+        # ==========================================
 
         target_x = x + w // 2
         target_y = y + h // 2
 
-        smooth_x = int(
-            smooth_x +
+        smooth_x += int(
             (target_x - smooth_x)
             * SMOOTHING
         )
 
-        smooth_y = int(
-            smooth_y +
+        smooth_y += int(
             (target_y - smooth_y)
             * SMOOTHING
         )
 
-        # ======================================
+        # ==========================================
         # AUTO ZOOM
-        # ======================================
+        # ==========================================
 
-        target_zoom = min(
-            MAX_ZOOM,
-            max(
-                1.0,
-                180 / max(w, 60)
-            )
-        )
+        qr_size = max(w, h)
+
+        if qr_size < 30:
+
+            target_zoom = 3.5
+
+        elif qr_size < 60:
+
+            target_zoom = 2.8
+
+        elif qr_size < 100:
+
+            target_zoom = 2.0
+
+        else:
+
+            target_zoom = 1.2
 
         zoom_level += (
             target_zoom - zoom_level
         ) * ZOOM_SPEED
 
-        # ======================================
-        # CROP
-        # ======================================
+        zoom_level = max(
+            MIN_ZOOM,
+            min(MAX_ZOOM, zoom_level)
+        )
+
+        # ==========================================
+        # CROP CALCULATION
+        # ==========================================
 
         crop_w = int(
             FRAME_WIDTH / zoom_level
@@ -198,13 +307,25 @@ while True:
             FRAME_HEIGHT / zoom_level
         )
 
+        center_x = smooth_x
+        center_y = smooth_y
+
+        # DEAD ZONE
+        if abs(center_x - FRAME_WIDTH // 2) < DEAD_ZONE:
+
+            center_x = FRAME_WIDTH // 2
+
+        if abs(center_y - FRAME_HEIGHT // 2) < DEAD_ZONE:
+
+            center_y = FRAME_HEIGHT // 2
+
         sx = max(
-            smooth_x - crop_w // 2,
+            center_x - crop_w // 2,
             0
         )
 
         sy = max(
-            smooth_y - crop_h // 2,
+            center_y - crop_h // 2,
             0
         )
 
@@ -218,22 +339,32 @@ while True:
             FRAME_HEIGHT
         )
 
-        cropped = original[
+        # SAFE CROP
+        if ex <= sx or ey <= sy:
+
+            continue
+
+        cropped = original_frame[
             sy:ey,
             sx:ex
         ]
+
+        # ==========================================
+        # RESIZE ZOOM FRAME
+        # ==========================================
 
         frame = cv2.resize(
             cropped,
             (
                 FRAME_WIDTH,
                 FRAME_HEIGHT
-            )
+            ),
+            interpolation=cv2.INTER_CUBIC
         )
 
-        # ======================================
+        # ==========================================
         # BOX RECALCULATION
-        # ======================================
+        # ==========================================
 
         scale_x = FRAME_WIDTH / crop_w
         scale_y = FRAME_HEIGHT / crop_h
@@ -253,43 +384,18 @@ while True:
         nx = cx - rw // 2
         ny = cy - rh // 2
 
-        # ======================================
+        # ==========================================
         # DISTANCE
-        # ======================================
+        # ==========================================
 
         distance = (
-            REAL_QR_WIDTH *
-            FOCAL_LENGTH
+            REAL_QR_WIDTH
+            * FOCAL_LENGTH
         ) / max(w, 1)
 
-        # ======================================
-        # RANGE
-        # ======================================
-
-        if distance < 20:
-            range_status = "VERY CLOSE"
-
-        elif distance < 50:
-            range_status = "GOOD RANGE"
-
-        elif distance < 100:
-            range_status = "MEDIUM RANGE"
-
-        else:
-            range_status = "LONG RANGE"
-
-        # ======================================
-        # ACCURACY
-        # ======================================
-
-        accuracy = min(
-            100,
-            int((w / 150) * 100)
-        )
-
-        # ======================================
-        # ACCESS
-        # ======================================
+        # ==========================================
+        # ACCESS STATUS
+        # ==========================================
 
         if qr_data == ALLOWED_QR:
 
@@ -301,9 +407,9 @@ while True:
             status = "ACCESS DENIED"
             color = (0, 0, 255)
 
-        # ======================================
+        # ==========================================
         # DRAWING
-        # ======================================
+        # ==========================================
 
         cv2.rectangle(
             frame,
@@ -329,16 +435,16 @@ while True:
             2
         )
 
-        # ======================================
-        # TEXT
-        # ======================================
+        # ==========================================
+        # DISPLAY TEXT
+        # ==========================================
 
         cv2.putText(
             frame,
-            "LOCKED QR",
-            (15, 35),
+            "PROFESSIONAL QR TRACKING",
+            (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.8,
             (0, 255, 255),
             2
         )
@@ -346,7 +452,7 @@ while True:
         cv2.putText(
             frame,
             status,
-            (15, 70),
+            (20, 80),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             color,
@@ -355,88 +461,95 @@ while True:
 
         cv2.putText(
             frame,
-            f"Accuracy: {accuracy}%",
-            (15, 105),
+            f"Distance : {distance:.1f} cm",
+            (20, 120),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 0),
-            2
-        )
-
-        cv2.putText(
-            frame,
-            f"Distance: {distance:.1f} cm",
-            (15, 140),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.65,
             (255, 0, 255),
             2
         )
 
         cv2.putText(
             frame,
-            f"Range: {range_status}",
-            (15, 175),
+            f"Zoom : {zoom_level:.1f}x",
+            (20, 160),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
+            0.65,
+            (255, 255, 0),
             2
         )
 
         cv2.putText(
             frame,
-            f"FPS: {int(fps)}",
-            (15, 210),
+            f"FPS : {int(fps)}",
+            (20, 200),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.65,
             (255, 255, 255),
             2
         )
 
         break
 
-    # ======================================
+    # ==========================================
     # SEARCH MODE
-    # ======================================
+    # ==========================================
 
     if not found_target:
-
-        lost_counter += 1
 
         cv2.putText(
             frame,
             "SEARCHING QR...",
-            (15, 40),
+            (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 0, 255),
             2
         )
 
-        if lost_counter > LOCK_TIMEOUT:
+        # SMOOTH RESET
+        zoom_level += (
+            1.0 - zoom_level
+        ) * 0.05
+
+        # RESET LOCK
+        if time.time() - last_seen_time > 2:
 
             locked_qr = None
-            zoom_level = 1.0
 
-    # ======================================
-    # DISPLAY
-    # ======================================
+    # ==========================================
+    # DISPLAY WINDOW
+    # ==========================================
 
     cv2.imshow(
         "ADVANCED QR TRACKING",
         frame
     )
 
-    # ======================================
+    # ==========================================
     # EXIT
-    # ======================================
+    # ==========================================
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+
         break
 
-# ======================================
+    # ==========================================
+    # FPS CONTROL
+    # ==========================================
+
+    elapsed = time.time() - loop_start
+
+    delay = max(
+        0,
+        (1 / FPS_LIMIT) - elapsed
+    )
+
+    time.sleep(delay)
+
+# ==========================================
 # CLEANUP
-# ======================================
+# ==========================================
 
 picam2.stop()
 
